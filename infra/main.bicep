@@ -9,6 +9,10 @@ param environmentName string
 @description('Primary location for all resources but AI Foundry.')
 param location string
 
+@minLength(1)
+@description('SharePoint Online site URL (e.g. https://contoso.sharepoint.com/sites/mysite)')
+param sharepointSiteUrl string
+
 #disable-next-line no-unused-vars
 var resourceToken = toLower(uniqueString(resourceGroup().id, environmentName, location))
 
@@ -22,7 +26,8 @@ module foundryModule 'foundry.bicep' = {
     resourceToken: resourceToken
     location: location
     appInsightsName: monitoringModule.outputs.appInsightsName
-    tags:tags
+    tags: tags
+    environmentName: environmentName
   }
 }
 
@@ -37,20 +42,18 @@ module searchModule 'search.bicep' = {
   }
 }
 
-// module graphPermissionsModule 'graph-permissions.bicep' = {
-//   name: 'graph-permissions'
-//   params: {
-//     sharepointAppServicePrincipalId: sharepointAppModule.outputs.servicePrincipalId
-//   }
-//   dependsOn: [
-//     sharepointAppModule
-//   ]
-// }
+module graphPermissionsModule 'graph-permissions.bicep' = {
+  name: 'graph-permissions'
+  params: {
+    sharepointAppServicePrincipalId: sharepointAppModule.outputs.servicePrincipalId
+  }
+}
 
 module sharepointAppModule 'sharepoint-app.bicep' = {
   name: 'sharepoint-app'
   params: {
     searchSystemIdentityPrincipalId: searchModule.outputs.searchSystemIdentityPrincipalId
+    environmentName: environmentName
   }
 }
 
@@ -59,7 +62,7 @@ module monitoringModule 'monitoring.bicep' = {
   params: {
     location: location
     resourceToken: resourceToken
-    tags:tags
+    tags: tags
   }
 }
 
@@ -72,3 +75,4 @@ output SEARCH_SERVICE_ENDPOINT string = searchModule.outputs.searchServiceEndpoi
 output SEARCH_SYSTEM_IDENTITY_PRINCIPAL_ID string = searchModule.outputs.searchSystemIdentityPrincipalId
 output SHAREPOINT_APP_ID string = sharepointAppModule.outputs.appId
 output AZURE_TENANT_ID string = tenant().tenantId
+output SHAREPOINT_SITE_URL string = sharepointSiteUrl

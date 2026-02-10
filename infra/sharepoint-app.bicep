@@ -2,8 +2,10 @@ extension graphV1
 
 targetScope = 'resourceGroup'
 
-@description('Display name for the Entra app registration')
-param appDisplayName string = 'SharePoint Indexer for Foundry IQ'
+@minLength(1)
+@maxLength(64)
+@description('Name of the the environment which is used to generate a short unique hash used in all resources.')
+param environmentName string
 
 @description('Object (principal) ID of the search service system-assigned managed identity')
 param searchSystemIdentityPrincipalId string
@@ -14,23 +16,23 @@ param searchSystemIdentityPrincipalId string
 // authenticate to SharePoint without a client secret.
 // ---------------------------------------------------------------------------
 resource sharepointApp 'Microsoft.Graph/applications@v1.0' = {
-  displayName: appDisplayName
-  uniqueName: 'foundryiq-sharepoint-indexer'
+  displayName: 'SharePoint Indexer for Foundry IQ - ${environmentName}'
+  uniqueName: 'foundryiq-sharepoint-indexer-${environmentName}'
   // Request Sites.Selected permission (application type) on Microsoft Graph
   // This must be admin-consented after deployment.
   requiredResourceAccess: [
     {
       resourceAppId: '00000003-0000-0000-c000-000000000000' // Microsoft Graph
       resourceAccess: [
+        // {
+        //   id: '883ea226-0bf2-4a8f-9f9d-92c9162a727d' // Sites.Selected (Application)
+        //   type: 'Role'
+        // }
         {
-          id: '883ea226-0bf2-4a8f-9f9d-92c9162a727d' // Sites.Selected (Application)
-          type: 'Role'
-        }
-         {
           id: '01d4889c-1287-42c6-ac1f-5d1e02578ef6' // Files.Read.All (Application)
           type: 'Role'
         }
-         {
+        {
           id: '332a536c-c7ef-4017-ab91-336970924f0d' // Sites.Read.All (Application)
           type: 'Role'
         }

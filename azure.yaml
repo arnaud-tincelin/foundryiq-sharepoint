@@ -12,3 +12,7 @@ hooks:
     shell: sh
     run: ./hooks/postdeploy.sh
     continueOnError: false
+  predown:
+    shell: sh
+    run: ./hooks/predown.sh
+    continueOnError: false

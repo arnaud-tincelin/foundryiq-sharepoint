@@ -11,6 +11,11 @@ param location string
 @description('Application Insights resource name')
 param appInsightsName string
 
+@minLength(1)
+@maxLength(64)
+@description('Name of the the environment which is used to generate a short unique hash used in all resources.')
+param environmentName string
+
 resource appInsights 'Microsoft.Insights/components@2020-02-02' existing = {
   name: appInsightsName
 }
@@ -77,7 +82,7 @@ resource foundry 'Microsoft.CognitiveServices/accounts@2025-10-01-preview' = {
   }
 
   resource project 'projects' = {
-    name: 'demo-project'
+    name: 'foundryiq-${environmentName}'
     location: location
     identity: {
       type: 'SystemAssigned'
