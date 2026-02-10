@@ -28,7 +28,7 @@ if az ad app show --id "$APP_ID" &>/dev/null; then
   az ad app delete --id "$APP_ID"
   echo "  ✅ App registration deleted (service principal removed automatically)."
 else
-  echo "  [info] App registration (appId: $APP_ID) not found - already deleted or never created."
+  echo "  ℹ️  App registration (appId: $APP_ID) not found - already deleted or never created."
 fi
 
 echo "==> Entra ID cleanup complete."
