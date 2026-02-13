@@ -15,6 +15,7 @@
       "extensions": [
         "ms-python.python",
         "ms-python.vscode-pylance",
+        "ms-toolsai.jupyter",
         "ms-azuretools.azure-dev",
         "ms-azuretools.vscode-bicep",
         "ms-azuretools.vscode-docker",

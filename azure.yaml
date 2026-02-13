@@ -7,6 +7,15 @@ infra:
   path: infra
   module: main
 
+services:
+  enrich-snippet:
+    host: containerapp
+    project: ./enrich-snippet
+    language: python
+    docker:
+      path: ./Dockerfile
+      remoteBuild: true
+
 hooks:
   postprovision:
     shell: sh

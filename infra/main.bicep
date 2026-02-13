@@ -66,6 +66,16 @@ module monitoringModule 'monitoring.bicep' = {
   }
 }
 
+module containerAppModule 'container-app.bicep' = {
+  name: 'container-app'
+  params: {
+    resourceToken: resourceToken
+    location: location
+    tags: tags
+    logAnalyticsWorkspaceName: monitoringModule.outputs.lawName
+  }
+}
+
 output PROJECT_ENDPOINT string = foundryModule.outputs.projectEndpoint
 output MODEL_DEPLOYMENT string = foundryModule.outputs.gpt41DeploymentName
 output EMBEDDING_DEPLOYMENT string = foundryModule.outputs.embeddingDeploymentName
@@ -76,3 +86,7 @@ output SEARCH_SYSTEM_IDENTITY_PRINCIPAL_ID string = searchModule.outputs.searchS
 output SHAREPOINT_APP_ID string = sharepointAppModule.outputs.appId
 output AZURE_TENANT_ID string = tenant().tenantId
 output SHAREPOINT_SITE_URL string = sharepointSiteUrl
+output CONTAINER_APP_NAME string = containerAppModule.outputs.containerAppName
+output CONTAINER_APP_URL string = containerAppModule.outputs.containerAppUrl
+output ACR_NAME string = containerAppModule.outputs.acrName
+output AZURE_CONTAINER_REGISTRY_ENDPOINT string = containerAppModule.outputs.acrLoginServer

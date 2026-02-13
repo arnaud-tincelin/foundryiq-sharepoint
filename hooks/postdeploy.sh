@@ -70,6 +70,14 @@ SP_CONNECTION_STRING="SharePointOnlineEndpoint=${SP_SITE_URL};ApplicationId=${SP
 # ---------- acquire an access token for Azure AI Search ----------
 TOKEN=$(az account get-access-token --resource "https://search.azure.com" --query accessToken -o tsv)
 
+# ---------- 0. Container App is deployed by azd (services.enrich-snippet) ----------
+ACR_NAME="${ACR_NAME:?'ACR_NAME is required - should be set by Bicep output'}"
+CONTAINER_APP_NAME="${CONTAINER_APP_NAME:?'CONTAINER_APP_NAME is required - should be set by Bicep output'}"
+CONTAINER_APP_URL="${CONTAINER_APP_URL:?'CONTAINER_APP_URL is required - should be set by Bicep output'}"
+RG="${AZURE_RESOURCE_GROUP:?'AZURE_RESOURCE_GROUP is required'}"
+
+echo "  ✅ Container App deployed by azd: ${CONTAINER_APP_URL}"
+
 echo "  Search endpoint : $SEARCH_ENDPOINT"
 echo "  SharePoint site : $SP_SITE_URL"
 echo "  Container       : $SP_CONTAINER"
@@ -77,9 +85,20 @@ echo "  Knowledge source: $KS_NAME"
 echo "  Knowledge base  : $KB_NAME"
 
 # ---------- 1. Create / update the indexed SharePoint knowledge source ----------
-echo "==> Creating indexed SharePoint knowledge source '${KS_NAME}'…"
+# Check if the KS already exists first - re-PUTting would fail if the index has
+# extra fields (like page_number) that aren't in the KS schema.
+echo "==> Checking for existing knowledge source '${KS_NAME}'…"
 
-KS_BODY=$(cat <<EOF
+KS_CHECK_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+  "${SEARCH_ENDPOINT}/knowledgesources/${KS_NAME}?api-version=${API_VERSION}" \
+  -H "Authorization: Bearer ${TOKEN}")
+
+if [[ "$KS_CHECK_CODE" -eq 200 ]]; then
+  echo "  ✅ Knowledge source '${KS_NAME}' already exists - skipping creation"
+else
+  echo "==> Creating indexed SharePoint knowledge source '${KS_NAME}'…"
+
+  KS_BODY=$(cat <<EOF
 {
   "name": "${KS_NAME}",
   "kind": "indexedSharePoint",
@@ -89,6 +108,7 @@ KS_BODY=$(cat <<EOF
     "containerName": "${SP_CONTAINER}",
     "query": "${SP_QUERY}",
     "ingestionParameters": {
+      "contentExtractionMode": "standard",
       "aiServices": {
         "uri": "${AOAI_ENDPOINT}"
       },
@@ -108,7 +128,6 @@ KS_BODY=$(cat <<EOF
           "modelName": "gpt-4.1"
         }
       },
-      "contentExtractionMode": "standard",
       "ingestionSchedule": {
         "interval": "P1D"
       }
@@ -116,24 +135,267 @@ KS_BODY=$(cat <<EOF
   }
 }
 EOF
-)
+  )
 
-KS_RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
-  "${SEARCH_ENDPOINT}/knowledgesources/${KS_NAME}?api-version=${API_VERSION}" \
+  KS_RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
+    "${SEARCH_ENDPOINT}/knowledgesources/${KS_NAME}?api-version=${API_VERSION}" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "${KS_BODY}")
+
+  KS_HTTP_CODE=$(echo "$KS_RESPONSE" | tail -1)
+  KS_RESPONSE_BODY=$(echo "$KS_RESPONSE" | sed '$d')
+
+  if [[ "$KS_HTTP_CODE" -ge 200 && "$KS_HTTP_CODE" -lt 300 ]]; then
+    echo "  ✅ Knowledge source '${KS_NAME}' created/updated (HTTP ${KS_HTTP_CODE})"
+  else
+    echo "  ⚠️  Knowledge source creation returned HTTP ${KS_HTTP_CODE}:"
+    echo "  ${KS_RESPONSE_BODY}"
+    echo "  (This is expected if the preview feature is not yet enabled - see README.md)"
+  fi
+fi
+
+# ---------- 1b. Patch the index, skillset & indexer ----------
+# - Add a Custom Web API Skill (Container App) to prepend [Page X] to snippets
+#   inline during indexing — works automatically for new documents
+# - Use metadata_spo_item_weburi for doc_url (real SharePoint web URL)
+INDEX_NAME="${KS_NAME}-index"
+INDEXER_NAME="${KS_NAME}-indexer"
+SKILLSET_NAME="${KS_NAME}-skillset"
+
+# Resolve the Container App URL for the Custom Web API Skill
+CONTAINER_URL="${CONTAINER_APP_URL:?'CONTAINER_APP_URL is required - should be set by Bicep output'}"
+SKILL_URI="${CONTAINER_URL}/api/enrich_snippet"
+echo "  Container App URL: ${CONTAINER_URL}"
+
+echo "==> Patching index '${INDEX_NAME}' to add page_number field…"
+
+# Wait for the index to be created by the knowledge source (may take a moment)
+for i in {1..12}; do
+  IDX_CHECK_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    "${SEARCH_ENDPOINT}/indexes/${INDEX_NAME}?api-version=${API_VERSION}" \
+    -H "Authorization: Bearer ${TOKEN}")
+  if [[ "$IDX_CHECK_CODE" -eq 200 ]]; then
+    break
+  fi
+  echo "  Waiting for index to be created (attempt $i/12)…"
+  sleep 10
+done
+
+if [[ "$IDX_CHECK_CODE" -ne 200 ]]; then
+  echo "  ⚠️  Index '${INDEX_NAME}' not found (HTTP ${IDX_CHECK_CODE}) — skipping index/skillset/indexer patches."
+  echo "     The knowledge source may not have been created. Re-run: azd hooks run postprovision"
+  exit 0
+fi
+
+CURRENT_INDEX=$(curl -s "${SEARCH_ENDPOINT}/indexes/${INDEX_NAME}?api-version=${API_VERSION}" \
+  -H "Authorization: Bearer ${TOKEN}")
+
+PATCHED_INDEX=$(echo "$CURRENT_INDEX" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for key in list(data.keys()):
+    if key.startswith('@odata'):
+        del data[key]
+existing = {f['name'] for f in data.get('fields', [])}
+new_fields = []
+if 'page_number' not in existing:
+    new_fields.append({
+        'name': 'page_number', 'type': 'Edm.Int32',
+        'searchable': False, 'filterable': True, 'retrievable': True,
+        'stored': True, 'sortable': True, 'facetable': False, 'key': False
+    })
+# Remove doc_web_url if it exists (no longer needed - doc_url now gets web URLs directly)
+data['fields'] = [f for f in data['fields'] if f['name'] != 'doc_web_url']
+if new_fields:
+    data['fields'].extend(new_fields)
+    print(json.dumps(data))
+else:
+    print('SKIP')
+")
+
+if [[ "$PATCHED_INDEX" != "SKIP" ]]; then
+  IDX_RESP=$(curl -s -w "\n%{http_code}" -X PUT \
+    "${SEARCH_ENDPOINT}/indexes/${INDEX_NAME}?api-version=${API_VERSION}" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "${PATCHED_INDEX}")
+  IDX_CODE=$(echo "$IDX_RESP" | tail -1)
+  if [[ "$IDX_CODE" -ge 200 && "$IDX_CODE" -lt 300 ]]; then
+    echo "  ✅ Index fields updated (HTTP ${IDX_CODE})"
+  else
+    echo "  ⚠️  Index patch returned HTTP ${IDX_CODE}: $(echo "$IDX_RESP" | sed '$d')"
+  fi
+else
+  echo "  ✅ All fields already exist in index"
+fi
+
+# Patch the skillset:
+# - Enable locationMetadata on ContentUnderstandingSkill (provides pageNumberFrom)
+# - Add Custom Web API Skill (Container App) to prepend "[Page X] " to snippets
+# - Update snippet projection to use enriched output from the custom skill
+echo "==> Patching skillset '${SKILLSET_NAME}' (WebApiSkill + locationMetadata)…"
+
+CURRENT_SKILLSET=$(curl -s "${SEARCH_ENDPOINT}/skillsets/${SKILLSET_NAME}?api-version=${API_VERSION}" \
+  -H "Authorization: Bearer ${TOKEN}")
+
+PATCHED_SKILLSET=$(echo "$CURRENT_SKILLSET" | SKILL_URI="$SKILL_URI" python3 -c "
+import sys, json, os
+data = json.load(sys.stdin)
+skill_uri = os.environ['SKILL_URI']
+
+for key in list(data.keys()):
+    if key.startswith('@odata') and key != '@odata.type':
+        del data[key]
+
+changed = False
+
+# --- 0. Enable locationMetadata on ContentUnderstandingSkill ---
+# Without this, text_sections do NOT include pageNumberFrom/pageNumberTo.
+for s in data.get('skills', []):
+    if s.get('@odata.type', '').endswith('ContentUnderstandingSkill'):
+        opts = s.get('extractionOptions') or []
+        if 'locationMetadata' not in opts:
+            opts.append('locationMetadata')
+            s['extractionOptions'] = opts
+            changed = True
+
+# --- 1. Remove old ConditionalSkill if present (replaced by WebApiSkill) ---
+before = len(data.get('skills', []))
+data['skills'] = [s for s in data.get('skills', []) if s.get('name') != 'enrichSnippetWithPage']
+if len(data['skills']) < before:
+    changed = True
+
+# --- 2. Add or update Custom Web API Skill ---
+existing_skill = next((s for s in data['skills'] if s.get('name') == 'enrichSnippetWebApi'), None)
+web_api_skill = {
+    '@odata.type': '#Microsoft.Skills.Custom.WebApiSkill',
+    'name': 'enrichSnippetWebApi',
+    'context': '/document/text_sections/*',
+    'uri': skill_uri,
+    'httpMethod': 'POST',
+    'timeout': 'PT30S',
+    'batchSize': 100,
+    'inputs': [
+        {'name': 'content', 'source': '/document/text_sections/*/content'},
+        {'name': 'pageNumber', 'source': '/document/text_sections/*/locationMetadata/pageNumberFrom'}
+    ],
+    'outputs': [
+        {'name': 'enriched_snippet', 'targetName': 'enriched_snippet'}
+    ]
+}
+if existing_skill:
+    # Update URI (function key may have changed)
+    if existing_skill.get('uri') != skill_uri:
+        idx = data['skills'].index(existing_skill)
+        data['skills'][idx] = web_api_skill
+        changed = True
+else:
+    data['skills'].append(web_api_skill)
+    changed = True
+
+# --- 3. Update index projections ---
+for sel in data.get('indexProjections', {}).get('selectors', []):
+    if sel.get('sourceContext', '').endswith('/text_sections/*'):
+        # Remove page_number mapping if present - page numbers are already
+        # embedded in the enriched_snippet by the WebApiSkill, and referencing
+        # locationMetadata/pageNumberFrom directly in a projection causes
+        # the entire ?map to fail for text_sections that lack that path.
+        before_len = len(sel.get('mappings', []))
+        sel['mappings'] = [m for m in sel.get('mappings', []) if m['name'] != 'page_number']
+        if len(sel['mappings']) < before_len:
+            changed = True
+
+        # Update snippet mapping to use enriched_snippet from WebApiSkill
+        for m in sel['mappings']:
+            if m['name'] == 'snippet' and m['source'] != '/document/text_sections/*/enriched_snippet':
+                m['source'] = '/document/text_sections/*/enriched_snippet'
+                changed = True
+
+if changed:
+    print(json.dumps(data))
+else:
+    print('SKIP')
+")
+
+if [[ "$PATCHED_SKILLSET" != "SKIP" ]]; then
+  SK_RESP=$(curl -s -w "\n%{http_code}" -X PUT \
+    "${SEARCH_ENDPOINT}/skillsets/${SKILLSET_NAME}?api-version=${API_VERSION}" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "${PATCHED_SKILLSET}")
+  SK_CODE=$(echo "$SK_RESP" | tail -1)
+  if [[ "$SK_CODE" -ge 200 && "$SK_CODE" -lt 300 ]]; then
+    echo "  ✅ Skillset updated with WebApiSkill (HTTP ${SK_CODE})"
+  else
+    echo "  ⚠️  Skillset patch returned HTTP ${SK_CODE}: $(echo "$SK_RESP" | sed '$d')"
+  fi
+else
+  echo "  ✅ Skillset already has WebApiSkill"
+fi
+
+# Patch the indexer:
+# - Use metadata_spo_item_weburi for doc_url (real SharePoint web URL instead of
+#   the Graph drive path from metadata_spo_item_path). This eliminates the need
+#   for post-indexing Graph API backfill.
+echo "==> Patching indexer '${INDEXER_NAME}' to use metadata_spo_item_weburi…"
+
+CURRENT_INDEXER=$(curl -s "${SEARCH_ENDPOINT}/indexers/${INDEXER_NAME}?api-version=${API_VERSION}" \
+  -H "Authorization: Bearer ${TOKEN}")
+
+PATCHED_INDEXER=$(echo "$CURRENT_INDEXER" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for key in list(data.keys()):
+    if key.startswith('@odata'):
+        del data[key]
+# Replace metadata_spo_item_path with metadata_spo_item_weburi for doc_url
+for m in data.get('fieldMappings', []):
+    if m.get('targetFieldName') == 'doc_url' and m.get('sourceFieldName') == 'metadata_spo_item_path':
+        m['sourceFieldName'] = 'metadata_spo_item_weburi'
+# Remove any doc_web_url mapping (no longer needed)
+data['fieldMappings'] = [m for m in data.get('fieldMappings', []) if m.get('targetFieldName') != 'doc_web_url']
+print(json.dumps(data))
+")
+
+IXER_RESP=$(curl -s -w "\n%{http_code}" -X PUT \
+  "${SEARCH_ENDPOINT}/indexers/${INDEXER_NAME}?api-version=${API_VERSION}" \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
-  -d "${KS_BODY}")
-
-KS_HTTP_CODE=$(echo "$KS_RESPONSE" | tail -1)
-KS_RESPONSE_BODY=$(echo "$KS_RESPONSE" | sed '$d')
-
-if [[ "$KS_HTTP_CODE" -ge 200 && "$KS_HTTP_CODE" -lt 300 ]]; then
-  echo "  ✅ Knowledge source '${KS_NAME}' created/updated (HTTP ${KS_HTTP_CODE})"
+  -d "${PATCHED_INDEXER}")
+IXER_CODE=$(echo "$IXER_RESP" | tail -1)
+if [[ "$IXER_CODE" -ge 200 && "$IXER_CODE" -lt 300 ]]; then
+  echo "  ✅ Indexer updated to use metadata_spo_item_weburi (HTTP ${IXER_CODE})"
 else
-  echo "  ⚠️  Knowledge source creation returned HTTP ${KS_HTTP_CODE}:"
-  echo "  ${KS_RESPONSE_BODY}"
-  echo "  (This is expected if the preview feature is not yet enabled - see README.md)"
+  echo "  ⚠️  Indexer patch returned HTTP ${IXER_CODE}: $(echo "$IXER_RESP" | sed '$d')"
 fi
+
+# Reset and re-run the indexer so all documents are freshly indexed
+echo "==> Resetting and re-running indexer '${INDEXER_NAME}'…"
+curl -s -o /dev/null -X POST "${SEARCH_ENDPOINT}/indexers/${INDEXER_NAME}/reset?api-version=${API_VERSION}" \
+  -H "Authorization: Bearer ${TOKEN}" -H "Content-Length: 0"
+sleep 2
+curl -s -o /dev/null -X POST "${SEARCH_ENDPOINT}/indexers/${INDEXER_NAME}/run?api-version=${API_VERSION}" \
+  -H "Authorization: Bearer ${TOKEN}" -H "Content-Length: 0"
+echo "  ✅ Indexer reset and re-run triggered"
+
+# Wait for the indexer to finish
+echo "==> Waiting for indexer to complete…"
+for i in $(seq 1 30); do
+  sleep 5
+  INDEXER_STATUS=$(curl -s "${SEARCH_ENDPOINT}/indexers/${INDEXER_NAME}/status?api-version=${API_VERSION}" \
+    -H "Authorization: Bearer ${TOKEN}" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+r = data.get('lastResult', {})
+print(r.get('status', 'unknown'))
+" 2>/dev/null)
+  if [[ "$INDEXER_STATUS" == "success" || "$INDEXER_STATUS" == "transientFailure" ]]; then
+    echo "  ✅ Indexer finished (status: ${INDEXER_STATUS})"
+    break
+  fi
+  echo "    … still running (attempt ${i}/30)"
+done
 
 # ---------- 2. Create / update the knowledge base ----------
 echo "==> Creating knowledge base '${KB_NAME}'…"
@@ -142,8 +404,8 @@ KB_BODY=$(cat <<EOF
 {
   "name": "${KB_NAME}",
   "description": "Foundry IQ knowledge base backed by indexed SharePoint content",
-  "retrievalInstructions": "Use the SharePoint knowledge source to answer questions about documents stored in SharePoint.",
-  "answerInstructions": "Provide concise, informative answers based on the retrieved SharePoint documents. Cite sources.",
+  "retrievalInstructions": "Use the SharePoint knowledge source to answer questions about documents stored in SharePoint. Always retrieve the doc_url, page_number, and snippet fields for each chunk.",
+  "answerInstructions": "Provide concise, informative answers. Each snippet starts with [Page X] indicating the source page number. Use this to cite pages accurately.",
   "outputMode": "extractiveData",
   "knowledgeSources": [
     {
