@@ -1,203 +1,65 @@
-# Foundry IQ – SharePoint Knowledge Base (Managed Identity)
+# Foundry IQ – SharePoint Demo
 
-This project deploys an **Azure AI Foundry** project with an **Azure AI Search**
-service connected to **SharePoint Online** via a **managed identity** (secretless
-authentication). It uses the [Foundry IQ](https://learn.microsoft.com/en-us/azure/ai-foundry/agents/concepts/what-is-foundry-iq)
-agentic retrieval pipeline to create a knowledge base backed by SharePoint content.
+End-to-end demo that deploys [Foundry IQ](https://learn.microsoft.com/en-us/azure/ai-foundry/agents/concepts/what-is-foundry-iq) on Azure to build an agentic retrieval knowledge base over **SharePoint Online** content. Users can then query their SharePoint documents through a GPT-4.1-powered agent that respects per-user SharePoint permissions.
+
+## Prerequisites
+
+> **Permissions are the main blocker** — make sure these are sorted before running `azd up`.
+
+| Requirement | Why |
+|---|---|
+| **Azure subscription** | Owner / Contributor to create resource groups & resources |
+| **Azure Developer CLI (`azd`)** | [Install](https://learn.microsoft.com/en-us/azure/developer/azure-developer-cli/install-azd) — drives provisioning & deployment |
+| **Entra ID privileges** | Ability to create App Registrations, grant **admin consent** for MS Graph `Files.Read.All` + `Sites.Read.All`, and add federated credentials |
+| **SharePoint Online (M365)** | Same Entra tenant as the Azure subscription |
+
+## Repo Structure
+
+```
+├── infra/                  # Bicep IaC — all Azure resources
+│   ├── main.bicep          #   Orchestrator (Foundry, Search, Container App, Monitoring, Entra app)
+│   ├── foundry.bicep       #   AI Foundry account + project + GPT-4.1 deployment
+│   ├── search.bicep        #   Azure AI Search (+ managed identities)
+│   ├── sharepoint-app.bicep#   Entra app registration + federated credential
+│   ├── container-app.bicep #   Container App (hosts the enrich-snippet skill)
+│   ├── graph-permissions.bicep # MS Graph API permission grants
+│   └── monitoring.bicep    #   Log Analytics + App Insights
+├── enrich-snippet/         # FastAPI custom Web API Skill (Container App)
+│   └── app.py              #   Prepends [Page X] to PDF snippets for the search indexer
+├── hooks/
+│   ├── postdeploy.sh       #   Creates the Foundry IQ knowledge source + knowledge base
+│   └── predown.sh          #   Cleanup on `azd down`
+├── test/                   # Test data generators
+├── run_foundryiq_agent.ipynb # Notebook to query the KB via a Foundry agent
+└── azure.yaml              # azd project definition
+```
 
 ## Architecture
 
 ```
-┌──────────────────────────────┐
-│  Azure AI Foundry (AI Svcs)  │
-│  ├─ Project: demo-project    │
-│  │  └─ Connection → AI Search│
-│  └─ GPT-4.1 deployment       │
-└───────────┬──────────────────┘
-            │ Cognitive Services User
-┌───────────▼──────────────────┐
-│  Azure AI Search  (Basic)    │
-│  ├─ System-assigned MI       │
-│  ├─ User-assigned MI ────────┼──► Federated credential on Entra app
-│  ├─ Knowledge Source (SPO)   │
-│  └─ Knowledge Base           │
-└──────────────────────────────┘
-            │ Copilot Retrieval API (on behalf of user)
-┌───────────▼──────────────────┐
-│  SharePoint Online (M365)    │
-└──────────────────────────────┘
+Azure AI Foundry  ──►  Azure AI Search  ──►  SharePoint Online
+   (GPT-4.1)         (Knowledge Base +       (indexed via federated
+                       managed identity)       credential — passwordless)
+                            │
+                    Container App
+                   (enrich-snippet skill)
 ```
 
-## Prerequisites
-
-| Requirement | Details |
-|---|---|
-| Azure subscription | With permissions to create resources |
-| Azure Developer CLI (`azd`) | [Install](https://learn.microsoft.com/en-us/azure/developer/azure-developer-cli/install-azd) |
-| SharePoint in Microsoft 365 | Same Entra tenant as the Azure subscription |
-| Tenant admin consent | Required for the Entra app registration |
-| Microsoft Copilot license | Required for the Copilot Retrieval API used by remote SharePoint knowledge sources |
+**Flow:** `azd up` provisions all infrastructure, deploys the Container App, then the `postdeploy` hook calls the Search Management API to create an **indexed** SharePoint knowledge source and knowledge base. The search indexer crawls SharePoint using a federated credential on the Entra app registration (no secrets).
 
 ## Quick Start
 
 ```bash
-# 1. Log in
 azd auth login
-
-# 2. Provision infrastructure + create knowledge base objects
-azd up
+azd up          # provisions infra + creates knowledge base
 ```
 
-After `azd up` completes, you **must** complete the manual Entra ID app
-registration steps below before SharePoint content is accessible.
-
-## Manual Steps – Entra ID App Registration
-
-The managed identity alone cannot access SharePoint. You need a **Microsoft Entra
-application registration** configured with a **federated credential** pointing to
-the user-assigned managed identity deployed by this project.
-
-### Step 1 – Create the app registration
-
-1. Go to the [Azure portal → Microsoft Entra ID → App registrations](https://portal.azure.com/#view/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/~/RegisteredApps).
-2. Click **+ New registration**.
-   - **Name**: e.g. `foundryiq-sharepoint-indexer`
-   - **Supported account types**: Single tenant
-   - **Redirect URI**: leave blank
-3. Click **Register**.
-
-### Step 2 – Add API permissions
-
-1. In the app registration, go to **API permissions → Add a permission → Microsoft Graph**.
-2. Choose **Application permissions**.
-3. Add:
-   - `Files.Read.All`
-   - `Sites.Read.All`
-4. Click **Grant admin consent for [your tenant]**.
-
-### Step 3 – Configure authentication
-
-1. Go to the **Authentication** tab.
-2. Set **Allow public client flows** to **Yes**.
-3. Click **Save**.
-
-### Step 4 – Add a federated credential (managed identity)
-
-This is the key step from [the documentation](https://learn.microsoft.com/en-us/azure/search/search-how-to-index-sharepoint-online#configuring-the-registered-application-with-a-managed-identity).
-
-1. In the app registration, go to **Certificates & Secrets → Federated credentials**.
-2. Click **+ Add credential**.
-3. Under **Federated credential scenario**, select **Managed Identity**.
-4. **Select managed identity**: Choose the user-assigned managed identity deployed
-   by this project. It is named `id-search-<token>` (you can find the exact name
-   in the `azd` output as `SEARCH_IDENTITY_NAME`).
-5. Add a **Name** for the credential (e.g. `search-managed-identity`).
-6. Click **Save**.
-
-### Step 5 – Note the values you'll need
-
-From the app registration **Overview** page, copy:
-- **Application (client) ID** → this is the `ApplicationId`
-- **Directory (tenant) ID** → this is the `TenantId`
-
-From the `azd` outputs (or Azure portal):
-- **`SEARCH_IDENTITY_PRINCIPAL_ID`** → this is the `FederatedCredentialObjectId`
-
-### Step 6 – (If using a SharePoint indexer) Create the data source
-
-If you want to index SharePoint content into a search index (rather than using
-the remote SharePoint knowledge source), create a data source with the secretless
-connection string:
-
-```
-SharePointOnlineEndpoint=https://yourcompany.sharepoint.com/sites/YourSite;ApplicationId=<app-id>;FederatedCredentialObjectId=<managed-identity-principal-id>;TenantId=<tenant-id>
-```
-
-## Environment Variables
-
-After `azd up`, these variables are set in your azd environment:
-
-| Variable | Description |
-|---|---|
-| `SEARCH_SERVICE_NAME` | Name of the Azure AI Search service |
-| `SEARCH_SERVICE_ENDPOINT` | HTTPS endpoint of the search service |
-| `SEARCH_IDENTITY_NAME` | Name of the user-assigned managed identity |
-| `SEARCH_IDENTITY_PRINCIPAL_ID` | Object (principal) ID of the managed identity – use as `FederatedCredentialObjectId` |
-| `SEARCH_IDENTITY_CLIENT_ID` | Client ID of the managed identity |
-| `SEARCH_IDENTITY_RESOURCE_ID` | Full ARM resource ID of the managed identity |
-| `PROJECT_ENDPOINT` | Foundry project endpoint |
-| `MODEL_DEPLOYMENT` | Name of the GPT-4.1 deployment |
-
-## Querying the Knowledge Base
-
-Once the Entra app is configured and admin consent is granted, you can query the
-knowledge base. The remote SharePoint knowledge source calls the Copilot Retrieval
-API **on behalf of the calling user**, so users only see content they have access to
-in SharePoint.
-
-```python
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-from azure.core.credentials import AzureKeyCredential
-from azure.search.documents.knowledgebases import KnowledgeBaseRetrievalClient
-from azure.search.documents.knowledgebases.models import (
-    KnowledgeBaseMessage,
-    KnowledgeBaseMessageTextContent,
-    KnowledgeBaseRetrievalRequest,
-    RemoteSharePointKnowledgeSourceParams,
-)
-
-# Get user access token for SharePoint
-identity_token_provider = get_bearer_token_provider(
-    DefaultAzureCredential(), "https://search.azure.com/.default"
-)
-token = identity_token_provider()
-
-kb_client = KnowledgeBaseRetrievalClient(
-    endpoint="<SEARCH_SERVICE_ENDPOINT>",
-    knowledge_base_name="sharepoint-kb",
-    credential=DefaultAzureCredential(),
-)
-
-request = KnowledgeBaseRetrievalRequest(
-    include_activity=True,
-    messages=[
-        KnowledgeBaseMessage(
-            role="user",
-            content=[KnowledgeBaseMessageTextContent(text="What are the latest project updates?")]
-        )
-    ],
-    knowledge_source_params=[
-        RemoteSharePointKnowledgeSourceParams(
-            knowledge_source_name="sharepoint-ks",
-            include_references=True,
-            include_reference_source_data=True,
-        )
-    ],
-)
-
-result = kb_client.retrieve(retrieval_request=request, x_ms_query_source_authorization=token)
-print(result.response[0].content[0].text)
-```
-
-## Optional: Customize SharePoint Filtering
-
-Set the `SHAREPOINT_FILTER` environment variable before running `azd up` to scope
-which SharePoint content is queried:
-
-```bash
-# Filter to a specific site
-azd env set SHAREPOINT_FILTER 'Path:"https://mycompany.sharepoint.com/sites/Engineering"'
-
-# Filter to specific file types
-azd env set SHAREPOINT_FILTER 'FileExtension:"docx" OR FileExtension:"pdf"'
-
-azd up
-```
+`azd up` will prompt for the SharePoint site URL and Azure region.
 
 ## References
 
-- [Index data from SharePoint document libraries](https://learn.microsoft.com/en-us/azure/search/search-how-to-index-sharepoint-online)
-- [Configuring the registered application with a managed identity](https://learn.microsoft.com/en-us/azure/search/search-how-to-index-sharepoint-online#configuring-the-registered-application-with-a-managed-identity)
+- [What is Foundry IQ](https://learn.microsoft.com/en-us/azure/ai-foundry/agents/concepts/what-is-foundry-iq)
+- [Index SharePoint data with managed identity](https://learn.microsoft.com/en-us/azure/search/search-how-to-index-sharepoint-online)
 - [Create a remote SharePoint knowledge source](https://learn.microsoft.com/en-us/azure/search/agentic-knowledge-source-how-to-sharepoint-remote)
 - [Create a knowledge base in Azure AI Search](https://learn.microsoft.com/en-us/azure/search/agentic-retrieval-how-to-create-knowledge-base)
 - [Foundry IQ](https://learn.microsoft.com/en-us/azure/ai-foundry/agents/concepts/what-is-foundry-iq)
