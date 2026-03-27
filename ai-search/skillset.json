@@ -1,0 +1,189 @@
+{
+  "@odata.etag": "\"0x8DE8C1C0E898211\"",
+  "name": "sharepoint-ks-skillset",
+  "description": "Skillset for knowledge source 'sharepoint-ks'",
+  "skills": [
+    {
+      "@odata.type": "#Microsoft.Skills.Util.ContentUnderstandingSkill",
+      "name": "contentUnderstandingSkill",
+      "context": "/document",
+      "extractionOptions": [
+        "images",
+        "locationMetadata"
+      ],
+      "inputs": [
+        {
+          "name": "file_data",
+          "source": "/document/file_data",
+          "inputs": []
+        }
+      ],
+      "outputs": [
+        {
+          "name": "text_sections",
+          "targetName": "text_sections"
+        },
+        {
+          "name": "normalized_images",
+          "targetName": "normalized_images"
+        }
+      ],
+      "chunkingProperties": {
+        "unit": "characters",
+        "maximumLength": 2000,
+        "overlapLength": 200
+      }
+    },
+    {
+      "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
+      "name": "AzureOpenAIEmbeddingSkill",
+      "description": "Generate embeddings",
+      "context": "/document/text_sections/*",
+      "resourceUri": "https://foundry-xe3yq3kz44kxe.services.ai.azure.com",
+      "deploymentId": "text-embedding-3-large",
+      "dimensions": 3072,
+      "modelName": "text-embedding-3-large",
+      "inputs": [
+        {
+          "name": "text",
+          "source": "/document/text_sections/*/content",
+          "inputs": []
+        }
+      ],
+      "outputs": [
+        {
+          "name": "embedding",
+          "targetName": "text_vector"
+        }
+      ]
+    },
+    {
+      "@odata.type": "#Microsoft.Skills.Custom.ChatCompletionSkill",
+      "name": "GenAISkill",
+      "description": "Generate chat responses for image verbalization",
+      "context": "/document/normalized_images/*",
+      "uri": "https://foundry-xe3yq3kz44kxe.services.ai.azure.com/openai/deployments/gpt-4.1/chat/completions?api-version=2024-10-21",
+      "httpMethod": "POST",
+      "timeout": "PT1M",
+      "batchSize": 1,
+      "inputs": [
+        {
+          "name": "systemMessage",
+          "source": "='You are tasked with generating concise, accurate descriptions of images, figures, diagrams, or charts in documents.'",
+          "inputs": []
+        },
+        {
+          "name": "userMessage",
+          "source": "='Please describe this image.'",
+          "inputs": []
+        },
+        {
+          "name": "image",
+          "source": "/document/normalized_images/*/data",
+          "inputs": []
+        }
+      ],
+      "outputs": [
+        {
+          "name": "response",
+          "targetName": "verbalizedImage"
+        }
+      ],
+      "httpHeaders": {}
+    },
+    {
+      "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
+      "name": "VerbalizedImageAzureOpenAIEmbeddingSkill",
+      "description": "Generate embeddings",
+      "context": "/document/normalized_images/*",
+      "resourceUri": "https://foundry-xe3yq3kz44kxe.services.ai.azure.com",
+      "deploymentId": "text-embedding-3-large",
+      "dimensions": 3072,
+      "modelName": "text-embedding-3-large",
+      "inputs": [
+        {
+          "name": "text",
+          "source": "/document/normalized_images/*/verbalizedImage",
+          "inputs": []
+        }
+      ],
+      "outputs": [
+        {
+          "name": "embedding",
+          "targetName": "verbalizedImage_vector"
+        }
+      ]
+    }
+  ],
+  "cognitiveServices": {
+    "@odata.type": "#Microsoft.Azure.Search.AIServicesByIdentity",
+    "description": "AI Services for knowledge source",
+    "subdomainUrl": "https://foundry-xe3yq3kz44kxe.services.ai.azure.com"
+  },
+  "indexProjections": {
+    "selectors": [
+      {
+        "targetIndexName": "sharepoint-ks-index",
+        "parentKeyFieldName": "snippet_parent_id",
+        "sourceContext": "/document/text_sections/*",
+        "mappings": [
+          {
+            "name": "snippet_vector",
+            "source": "/document/text_sections/*/text_vector",
+            "inputs": []
+          },
+          {
+            "name": "snippet",
+            "source": "/document/text_sections/*/content",
+            "inputs": []
+          },
+          {
+            "name": "page_number",
+            "source": "/document/text_sections/*/locationMetadata/pageNumberFrom",
+            "inputs": []
+          },
+          {
+            "name": "title",
+            "source": "/document/metadata_spo_item_name",
+            "inputs": []
+          },
+          {
+            "name": "doc_url",
+            "source": "/document/metadata_spo_item_weburi",
+            "inputs": []
+          }
+        ]
+      },
+      {
+        "targetIndexName": "sharepoint-ks-index",
+        "parentKeyFieldName": "image_snippet_parent_id",
+        "sourceContext": "/document/normalized_images/*",
+        "mappings": [
+          {
+            "name": "snippet_vector",
+            "source": "/document/normalized_images/*/verbalizedImage_vector",
+            "inputs": []
+          },
+          {
+            "name": "snippet",
+            "source": "/document/normalized_images/*/verbalizedImage",
+            "inputs": []
+          },
+          {
+            "name": "title",
+            "source": "/document/metadata_spo_item_name",
+            "inputs": []
+          },
+          {
+            "name": "doc_url",
+            "source": "/document/metadata_spo_item_weburi",
+            "inputs": []
+          }
+        ]
+      }
+    ],
+    "parameters": {
+      "projectionMode": "skipIndexingParentDocuments"
+    }
+  }
+}

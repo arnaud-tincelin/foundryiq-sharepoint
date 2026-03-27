@@ -1,0 +1,20 @@
+{
+  "@odata.context": "https://search-xe3yq3kz44kxe.search.windows.net/$metadata#datasources/$entity",
+  "@odata.etag": "\"0x8DE8C1B938A5D06\"",
+  "name": "sharepoint-ks-datasource",
+  "description": "Data source for knowledge source 'sharepoint-ks'",
+  "type": "sharepoint",
+  "subtype": null,
+  "indexerPermissionOptions": [],
+  "credentials": {
+    "connectionString": "SharePointOnlineEndpoint=https://mngenvmcap258773.sharepoint.com/sites/HRPolicies;ApplicationId=f1f72b57-288a-4bc9-a02c-0212d79c65ae;TenantId=f0ea5a7d-1c33-4b47-a734-75a9b3c22695;"
+  },
+  "container": {
+    "name": "allSiteLibraries",
+    "query": null
+  },
+  "dataChangeDetectionPolicy": null,
+  "dataDeletionDetectionPolicy": null,
+  "encryptionKey": null,
+  "identity": null
+}

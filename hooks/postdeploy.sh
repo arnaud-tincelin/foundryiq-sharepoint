@@ -232,17 +232,16 @@ fi
 
 # Patch the skillset:
 # - Enable locationMetadata on ContentUnderstandingSkill (provides pageNumberFrom)
-# - Add Custom Web API Skill (Container App) to prepend "[Page X] " to snippets
-# - Update snippet projection to use enriched output from the custom skill
-echo "==> Patching skillset '${SKILLSET_NAME}' (WebApiSkill + locationMetadata)…"
+# - Fix sourceContext from /document/pages/* to /document/text_sections/*
+# - Ensure page_number and snippet mappings exist with correct sources
+echo "==> Patching skillset '${SKILLSET_NAME}' (locationMetadata + projections)…"
 
 CURRENT_SKILLSET=$(curl -s "${SEARCH_ENDPOINT}/skillsets/${SKILLSET_NAME}?api-version=${API_VERSION}" \
   -H "Authorization: Bearer ${TOKEN}")
 
-PATCHED_SKILLSET=$(echo "$CURRENT_SKILLSET" | SKILL_URI="$SKILL_URI" python3 -c "
-import sys, json, os
+PATCHED_SKILLSET=$(echo "$CURRENT_SKILLSET" | python3 -c "
+import sys, json
 data = json.load(sys.stdin)
-skill_uri = os.environ['SKILL_URI']
 
 for key in list(data.keys()):
     if key.startswith('@odata') and key != '@odata.type':
@@ -251,7 +250,6 @@ for key in list(data.keys()):
 changed = False
 
 # --- 0. Enable locationMetadata on ContentUnderstandingSkill ---
-# Without this, text_sections do NOT include pageNumberFrom/pageNumberTo.
 for s in data.get('skills', []):
     if s.get('@odata.type', '').endswith('ContentUnderstandingSkill'):
         opts = s.get('extractionOptions') or []
@@ -260,57 +258,44 @@ for s in data.get('skills', []):
             s['extractionOptions'] = opts
             changed = True
 
-# --- 1. Remove old ConditionalSkill if present (replaced by WebApiSkill) ---
+# --- 1. Remove WebApiSkill / ConditionalSkill if present (no longer needed) ---
+remove_names = {'enrichSnippetWebApi', 'enrichSnippetWithPage'}
 before = len(data.get('skills', []))
-data['skills'] = [s for s in data.get('skills', []) if s.get('name') != 'enrichSnippetWithPage']
+data['skills'] = [s for s in data.get('skills', []) if s.get('name') not in remove_names]
 if len(data['skills']) < before:
     changed = True
 
-# --- 2. Add or update Custom Web API Skill ---
-existing_skill = next((s for s in data['skills'] if s.get('name') == 'enrichSnippetWebApi'), None)
-web_api_skill = {
-    '@odata.type': '#Microsoft.Skills.Custom.WebApiSkill',
-    'name': 'enrichSnippetWebApi',
-    'context': '/document/text_sections/*',
-    'uri': skill_uri,
-    'httpMethod': 'POST',
-    'timeout': 'PT30S',
-    'batchSize': 100,
-    'inputs': [
-        {'name': 'content', 'source': '/document/text_sections/*/content'},
-        {'name': 'pageNumber', 'source': '/document/text_sections/*/locationMetadata/pageNumberFrom'}
-    ],
-    'outputs': [
-        {'name': 'enriched_snippet', 'targetName': 'enriched_snippet'}
-    ]
-}
-if existing_skill:
-    # Update URI (function key may have changed)
-    if existing_skill.get('uri') != skill_uri:
-        idx = data['skills'].index(existing_skill)
-        data['skills'][idx] = web_api_skill
-        changed = True
-else:
-    data['skills'].append(web_api_skill)
-    changed = True
-
-# --- 3. Update index projections ---
+# --- 2. Fix index projections ---
 for sel in data.get('indexProjections', {}).get('selectors', []):
-    if sel.get('sourceContext', '').endswith('/text_sections/*'):
-        # Remove page_number mapping if present - page numbers are already
-        # embedded in the enriched_snippet by the WebApiSkill, and referencing
-        # locationMetadata/pageNumberFrom directly in a projection causes
-        # the entire ?map to fail for text_sections that lack that path.
-        before_len = len(sel.get('mappings', []))
-        sel['mappings'] = [m for m in sel.get('mappings', []) if m['name'] != 'page_number']
-        if len(sel['mappings']) < before_len:
-            changed = True
+    # Fix sourceContext: pages/* -> text_sections/*
+    ctx = sel.get('sourceContext', '')
+    if ctx.endswith('/pages/*'):
+        sel['sourceContext'] = ctx.replace('/pages/*', '/text_sections/*')
+        changed = True
 
-        # Update snippet mapping to use enriched_snippet from WebApiSkill
+    if sel.get('sourceContext', '').endswith('/text_sections/*'):
+        existing = {m['name'] for m in sel.get('mappings', [])}
+
+        # Fix snippet_vector source
         for m in sel['mappings']:
-            if m['name'] == 'snippet' and m['source'] != '/document/text_sections/*/enriched_snippet':
-                m['source'] = '/document/text_sections/*/enriched_snippet'
+            if m['name'] == 'snippet_vector' and '/text_sections/' not in m.get('source', ''):
+                m['source'] = '/document/text_sections/*/text_vector'
                 changed = True
+
+        # Ensure snippet mapping exists and points to content (not enriched_snippet)
+        if 'snippet' not in existing:
+            sel['mappings'].append({'name': 'snippet', 'source': '/document/text_sections/*/content', 'inputs': []})
+            changed = True
+        else:
+            for m in sel['mappings']:
+                if m['name'] == 'snippet' and m['source'] != '/document/text_sections/*/content':
+                    m['source'] = '/document/text_sections/*/content'
+                    changed = True
+
+        # Ensure page_number mapping exists
+        if 'page_number' not in existing:
+            sel['mappings'].append({'name': 'page_number', 'source': '/document/text_sections/*/locationMetadata/pageNumberFrom', 'inputs': []})
+            changed = True
 
 if changed:
     print(json.dumps(data))
@@ -326,12 +311,12 @@ if [[ "$PATCHED_SKILLSET" != "SKIP" ]]; then
     -d "${PATCHED_SKILLSET}")
   SK_CODE=$(echo "$SK_RESP" | tail -1)
   if [[ "$SK_CODE" -ge 200 && "$SK_CODE" -lt 300 ]]; then
-    echo "  ✅ Skillset updated with WebApiSkill (HTTP ${SK_CODE})"
+    echo "  ✅ Skillset updated (HTTP ${SK_CODE})"
   else
     echo "  ⚠️  Skillset patch returned HTTP ${SK_CODE}: $(echo "$SK_RESP" | sed '$d')"
   fi
 else
-  echo "  ✅ Skillset already has WebApiSkill"
+  echo "  ✅ Skillset already up to date"
 fi
 
 # Patch the indexer:
