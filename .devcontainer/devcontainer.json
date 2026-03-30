@@ -1,5 +1,5 @@
 {
-  "name": "Hosted Agent Development",
+  "name": "Microsoft Foundry IQ x Sharepoint",
   "image": "mcr.microsoft.com/devcontainers/base:debian",
   "features": {
     "ghcr.io/devcontainers/features/python:1": {

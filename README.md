@@ -1,10 +1,52 @@
-# Foundry IQ – SharePoint Demo
+# Microsoft Foundry IQ ♡ SharePoint Demo
 
-End-to-end demo that deploys [Foundry IQ](https://learn.microsoft.com/en-us/azure/ai-foundry/agents/concepts/what-is-foundry-iq) on Azure to build an agentic retrieval knowledge base over **SharePoint Online** content. Users can then query their SharePoint documents through a GPT-4.1-powered agent that respects per-user SharePoint permissions.
+This repository demonstrates how to connect a Sharepoint site to a Microsoft Foundry Agent through [Foundry IQ](https://learn.microsoft.com/en-us/azure/ai-foundry/agents/concepts/what-is-foundry-iq).  
+It leverages an [Indexed Sharepoint Knowledge Source](https://learn.microsoft.com/en-us/azure/search/agentic-knowledge-source-how-to-sharepoint-indexed?pivots=csharp). 
 
-## Prerequisites
+![demo.gif](/doc/demo.gif)
 
-> **Permissions are the main blocker** — make sure these are sorted before running `azd up`.
+## Architecture
+
+```
+Azure AI Foundry  ──►  Azure AI Search  ──►  SharePoint Online
+   (GPT-4.1)         (Knowledge Base +       (indexed via federated
+                       managed identity)       credential — passwordless)
+```
+
+Note: the agent is authenticated on sharepoint through its identity; it is not leveraging OBO authentication.
+
+
+## Repo Structure
+
+```
+├── ai-search/              # AI Search resource templates (envsubst placeholders)
+│   ├── datasource.json     #   SharePoint data source
+│   ├── index.json          #   Search index (snippet, title, page_number, doc_url, vectors)
+│   ├── skillset.json       #   Skillset (chunking, embeddings, image verbalization, projections)
+│   └── indexer.json        #   Indexer (daily schedule, field mappings)
+├── infra/                  # Bicep IaC — all Azure resources
+│   ├── main.bicep          #   Orchestrator (Foundry, Search, Monitoring, Entra app)
+│   ├── foundry.bicep       #   AI Foundry account + project + model deployments
+│   ├── search.bicep        #   Azure AI Search (+ RBAC for Foundry ↔ Search)
+│   ├── sharepoint-app.bicep#   Entra app registration + federated credential
+│   ├── graph-permissions.bicep # MS Graph API permission grants
+│   └── monitoring.bicep    #   Log Analytics + App Insights
+├── agent/
+│   └── instructions.txt    # Agent system prompt (shared by hooks + notebook)
+├── hooks/
+│   ├── postdeploy.sh       #   Orchestrator — resolves env vars, calls the two scripts below
+│   ├── setup-search.sh     #   AI Search: knowledge source → custom templates → indexer → KB
+│   ├── setup-agent.sh      #   Foundry: MCP connection → duplicate cleanup → prompt agent
+│   └── predown.sh          #   Cleans up Entra app on `azd down`
+├── test/                   # Test data generators
+├── run_foundryiq_agent.ipynb # Notebook to query the KB via a Foundry agent
+└── azure.yaml              # azd project definition
+```
+
+## Quick Start
+
+### Deployment pre-requisites
+Required permissions:
 
 | Requirement | Why |
 |---|---|
@@ -13,48 +55,49 @@ End-to-end demo that deploys [Foundry IQ](https://learn.microsoft.com/en-us/azur
 | **Entra ID privileges** | Ability to create App Registrations, grant **admin consent** for MS Graph `Files.Read.All` + `Sites.Read.All`, and add federated credentials |
 | **SharePoint Online (M365)** | Same Entra tenant as the Azure subscription |
 
-## Repo Structure
-
-```
-├── infra/                  # Bicep IaC — all Azure resources
-│   ├── main.bicep          #   Orchestrator (Foundry, Search, Container App, Monitoring, Entra app)
-│   ├── foundry.bicep       #   AI Foundry account + project + GPT-4.1 deployment
-│   ├── search.bicep        #   Azure AI Search (+ managed identities)
-│   ├── sharepoint-app.bicep#   Entra app registration + federated credential
-│   ├── container-app.bicep #   Container App (hosts the enrich-snippet skill)
-│   ├── graph-permissions.bicep # MS Graph API permission grants
-│   └── monitoring.bicep    #   Log Analytics + App Insights
-├── enrich-snippet/         # FastAPI custom Web API Skill (Container App)
-│   └── app.py              #   Prepends [Page X] to PDF snippets for the search indexer
-├── hooks/
-│   ├── postdeploy.sh       #   Creates the Foundry IQ knowledge source + knowledge base
-│   └── predown.sh          #   Cleanup on `azd down`
-├── test/                   # Test data generators
-├── run_foundryiq_agent.ipynb # Notebook to query the KB via a Foundry agent
-└── azure.yaml              # azd project definition
-```
-
-## Architecture
-
-```
-Azure AI Foundry  ──►  Azure AI Search  ──►  SharePoint Online
-   (GPT-4.1)         (Knowledge Base +       (indexed via federated
-                       managed identity)       credential — passwordless)
-                            │
-                    Container App
-                   (enrich-snippet skill)
-```
-
-**Flow:** `azd up` provisions all infrastructure, deploys the Container App, then the `postdeploy` hook calls the Search Management API to create an **indexed** SharePoint knowledge source and knowledge base. The search indexer crawls SharePoint using a federated credential on the Entra app registration (no secrets).
-
-## Quick Start
+### Deployment
 
 ```bash
 azd auth login
-azd up          # provisions infra + creates knowledge base
+azd env set SHAREPOINT_SITE_URL https://contoso.sharepoint.com/sites/mysite
+azd up
 ```
 
-`azd up` will prompt for the SharePoint site URL and Azure region.
+Note: `azd up` will prompt for the environment name and Azure region, then provision infrastructure and deploy search resources.
+
+### Skillset & Content Understanding
+
+The skillset uses Azure AI Search's **Content Understanding skill** to ingest and chunk SharePoint documents (PDF, DOCX, etc.) into manageable text sections with location metadata, while also extracting embedded images. Each text chunk is then vectorized with `text-embedding-3-large` for semantic search. Extracted images are passed through a **Chat Completion skill** that verbalizes them—generating natural-language descriptions of figures, diagrams, and charts—so visual content becomes searchable alongside text. The resulting chunks, vectors, and verbalized images are projected into the search index via index projections, giving the Foundry agent a rich, multimodal knowledge base over your SharePoint content.
+
+**Index Fields**
+
+| Field | Type | Source |
+|---|---|---|
+| `snippet` | `Edm.String` | Chunked text content from `ContentUnderstandingSkill` |
+| `snippet_vector` | `Collection(Edm.Single)` | `text-embedding-3-large` (3072 dims) |
+| `title` | `Edm.String` | `metadata_spo_item_name` (SharePoint file name) |
+| `doc_url` | `Edm.String` | `metadata_spo_item_weburi` (SharePoint web URL) |
+| `page_number` | `Edm.Int32` | `locationMetadata/pageNumberFrom` (PDF pages; null for DOCX) |
+
+### Prompt examples
+
+> how to do Professional Use of Social Media?
+
+> what are the implications of violating the attendee policy?
+
+> quelle est la politique de congés maternité ?
+
+### Customisation
+
+| Variable | Default | Description |
+|---|---|---|
+| `SHAREPOINT_SITE_URL` | *(required)* | SharePoint site to index |
+| `SHAREPOINT_CONTAINER` | `allSiteLibraries` | `defaultSiteLibrary`, `allSiteLibraries`, or `useQuery` |
+| `SHAREPOINT_QUERY` | *(empty)* | File filter when container is `useQuery` |
+| `KNOWLEDGE_SOURCE_NAME` | `sharepoint-ks` | Name prefix for search resources |
+| `KNOWLEDGE_BASE_NAME` | `sharepoint-kb` | Knowledge base name |
+| `AGENT_NAME` | `foundryiq-sharepoint-agent` | Foundry agent name |
+| `AGENT_DESCRIPTION` | `HR SharePoint agent…` | Agent description |
 
 ## References
 

@@ -1,7 +1,6 @@
 {
-  "@odata.etag": "\"0x8DE8C1C0E898211\"",
-  "name": "sharepoint-ks-skillset",
-  "description": "Skillset for knowledge source 'sharepoint-ks'",
+  "name": "${KS_NAME}-skillset",
+  "description": "Skillset for knowledge source '${KS_NAME}'",
   "skills": [
     {
       "@odata.type": "#Microsoft.Skills.Util.ContentUnderstandingSkill",
@@ -39,8 +38,8 @@
       "name": "AzureOpenAIEmbeddingSkill",
       "description": "Generate embeddings",
       "context": "/document/text_sections/*",
-      "resourceUri": "https://foundry-xe3yq3kz44kxe.services.ai.azure.com",
-      "deploymentId": "text-embedding-3-large",
+      "resourceUri": "${AOAI_ENDPOINT}",
+      "deploymentId": "${EMBEDDING_DEPLOY}",
       "dimensions": 3072,
       "modelName": "text-embedding-3-large",
       "inputs": [
@@ -62,7 +61,7 @@
       "name": "GenAISkill",
       "description": "Generate chat responses for image verbalization",
       "context": "/document/normalized_images/*",
-      "uri": "https://foundry-xe3yq3kz44kxe.services.ai.azure.com/openai/deployments/gpt-4.1/chat/completions?api-version=2024-10-21",
+      "uri": "${AOAI_ENDPOINT}/openai/deployments/${MODEL_DEPLOY}/chat/completions?api-version=2024-10-21",
       "httpMethod": "POST",
       "timeout": "PT1M",
       "batchSize": 1,
@@ -96,8 +95,8 @@
       "name": "VerbalizedImageAzureOpenAIEmbeddingSkill",
       "description": "Generate embeddings",
       "context": "/document/normalized_images/*",
-      "resourceUri": "https://foundry-xe3yq3kz44kxe.services.ai.azure.com",
-      "deploymentId": "text-embedding-3-large",
+      "resourceUri": "${AOAI_ENDPOINT}",
+      "deploymentId": "${EMBEDDING_DEPLOY}",
       "dimensions": 3072,
       "modelName": "text-embedding-3-large",
       "inputs": [
@@ -118,12 +117,12 @@
   "cognitiveServices": {
     "@odata.type": "#Microsoft.Azure.Search.AIServicesByIdentity",
     "description": "AI Services for knowledge source",
-    "subdomainUrl": "https://foundry-xe3yq3kz44kxe.services.ai.azure.com"
+    "subdomainUrl": "${AOAI_ENDPOINT}"
   },
   "indexProjections": {
     "selectors": [
       {
-        "targetIndexName": "sharepoint-ks-index",
+        "targetIndexName": "${KS_NAME}-index",
         "parentKeyFieldName": "snippet_parent_id",
         "sourceContext": "/document/text_sections/*",
         "mappings": [
@@ -155,7 +154,7 @@
         ]
       },
       {
-        "targetIndexName": "sharepoint-ks-index",
+        "targetIndexName": "${KS_NAME}-index",
         "parentKeyFieldName": "image_snippet_parent_id",
         "sourceContext": "/document/normalized_images/*",
         "mappings": [

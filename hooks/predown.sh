@@ -24,9 +24,19 @@ fi
 
 # Check if the app registration still exists
 if az ad app show --id "$APP_ID" &>/dev/null; then
+  # Get the object ID needed for permanent deletion
+  OBJECT_ID=$(az ad app show --id "$APP_ID" --query id -o tsv)
   echo "  🗑️  Deleting Entra app registration (appId: $APP_ID)…"
   az ad app delete --id "$APP_ID"
-  echo "  ✅ App registration deleted (service principal removed automatically)."
+  echo "  ✅ App registration soft-deleted."
+
+  # Permanently purge so the uniqueName is freed for re-provisioning
+  echo "  🗑️  Permanently purging soft-deleted app…"
+  if az rest --method DELETE --url "https://graph.microsoft.com/v1.0/directory/deletedItems/${OBJECT_ID}" 2>/dev/null; then
+    echo "  ✅ App permanently purged."
+  else
+    echo "  ⚠️  Purge failed — may need to wait or delete manually in Entra portal."
+  fi
 else
   echo "  ℹ️  App registration (appId: $APP_ID) not found - already deleted or never created."
 fi

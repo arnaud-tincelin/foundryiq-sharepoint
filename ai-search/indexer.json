@@ -1,18 +1,14 @@
 {
-  "@odata.context": "https://search-xe3yq3kz44kxe.search.windows.net/$metadata#indexers/$entity",
-  "@odata.etag": "\"0x8DE8C1C198C464E\"",
-  "name": "sharepoint-ks-indexer",
-  "description": "Indexer for knowledge source 'sharepoint-ks'",
-  "dataSourceName": "sharepoint-ks-datasource",
-  "skillsetName": "sharepoint-ks-skillset",
-  "targetIndexName": "sharepoint-ks-index",
+  "name": "${KS_NAME}-indexer",
+  "description": "Indexer for knowledge source '${KS_NAME}'",
+  "dataSourceName": "${KS_NAME}-datasource",
+  "skillsetName": "${KS_NAME}-skillset",
+  "targetIndexName": "${KS_NAME}-index",
   "disabled": false,
   "schedule": {
-    "interval": "P1D",
-    "startTime": "2026-02-13T19:19:54.202Z"
+    "interval": "P1D"
   },
   "parameters": {
-    "batchSize": null,
     "maxFailedItems": -1,
     "maxFailedItemsPerBatch": -1,
     "configuration": {
@@ -24,11 +20,7 @@
   "fieldMappings": [
     {
       "sourceFieldName": "metadata_spo_item_weburi",
-      "targetFieldName": "doc_url",
-      "mappingFunction": null
+      "targetFieldName": "doc_url"
     }
-  ],
-  "outputFieldMappings": [],
-  "cache": null,
-  "encryptionKey": null
+  ]
 }
